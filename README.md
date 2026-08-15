@@ -60,7 +60,6 @@ flowchart TD
     PUB --> EMAIL[SES: Summary Email + Secure Links]
 
     ECS -.logs/metrics.-> CW[CloudWatch]
-    ECS -.credentials.-> SM[Secrets Manager]
 ```
 
 **Every run** gets its own immutable `run_id` prefix in S3 (raw snapshot,

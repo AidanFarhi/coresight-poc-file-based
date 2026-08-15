@@ -26,13 +26,13 @@ By Monday morning, the system should automatically produce a trustworthy job-pro
 Source A — Field Service / CRM API  
 Simulate a ServiceTitan-like system.  
 Entities: customers, jobs, invoices.  
-Access pattern: REST API using credentials stored in Secrets Manager.  
+Access pattern: REST API.  
 The fake API should support pagination, full-list extraction, canceled jobs, revised records, and occasional duplicate or malformed source records.
 
 Source B — Accounting API  
 Simulate a QuickBooks-like accounting system.  
 Entities: vendor expenses, material purchases, adjustments.  
-Access pattern: REST API using credentials stored in Secrets Manager.  
+Access pattern: REST API.  
 The schema should intentionally differ from the field-service system. Some expenses should contain a direct job reference; others should require matching through customer/project references or memo text.
 
 Source C — Payroll / Timekeeping File Feed  
@@ -61,7 +61,6 @@ Email summary \+ secure download links
 
 Supporting services  
 S3: inbound payroll files, immutable raw snapshots, candidate outputs, published reports, validation results, and run manifests.  
-Secrets Manager: source-system API credentials and any email/service credentials.  
 CloudWatch: task logs, execution status, errors, and alarms.  
 EventBridge: invokes the scheduled ECS/Fargate task.  
 SES or equivalent delivery mechanism: sends the report summary and secure links to the end user.
@@ -248,7 +247,6 @@ Infrastructure
 New isolated AWS sandbox account.  
 Infrastructure-as-code for the required AWS resources where practical.  
 S3 buckets/prefixes and lifecycle configuration.  
-Secrets Manager secrets.  
 ECS/Fargate task definition and container image.  
 EventBridge schedule.  
 CloudWatch logging and basic alarms.  
@@ -315,7 +313,7 @@ No attempt to simulate enterprise-scale data volumes.
 
 Phase 1 — Generate realistic fake data and manually calculate the expected profitability result for a small test subset.  
 Phase 2 — Build the fake field-service API, fake accounting API, and payroll-file generator.  
-Phase 3 — Provision S3, Secrets Manager, ECS/Fargate, EventBridge, and CloudWatch.  
+Phase 3 — Provision S3, ECS/Fargate, EventBridge, and CloudWatch.  
 Phase 4 — Build the full-extraction logic and write immutable raw snapshots to S3.  
 Phase 5 — Build the transform/reconciliation logic locally against raw snapshots.  
 Phase 6 — Add validation checks and business-exception generation.  
