@@ -27,7 +27,7 @@ Source A — Field Service / CRM API
 Simulate a ServiceTitan-like system.  
 Entities: customers, jobs, invoices.  
 Access pattern: REST API.  
-The fake API should support pagination, full-list extraction, canceled jobs, revised records, and occasional duplicate or malformed source records.
+The fake API returns the full dataset in a single call (no pagination) — one request returns the complete list — and should include canceled jobs, revised records, and occasional duplicate or malformed source records.
 
 Source B — Accounting API  
 Simulate a QuickBooks-like accounting system.  
@@ -201,7 +201,7 @@ Generate an XLSX workbook instead of or in addition to CSV if that better matche
 Fake field-service API  
 Small Python service or mocked HTTP API.  
 Generate 6–12 months of customers, jobs, and invoices.  
-Support pagination and full extraction.  
+Return the full dataset in a single call — no pagination.  
 Allow later source corrections between scheduled runs.
 
 Fake accounting API  
