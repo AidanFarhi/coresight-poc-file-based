@@ -35,10 +35,12 @@ Access pattern: REST API over HTTPS, authenticated, full extract in a single cal
 The schema should intentionally differ from the field-service system. Some expenses should contain a direct job reference; others should require matching through customer/project references or memo text. Include realistic failure modes (unavailable, authentication failure, unexpected schema).
 
 Source C — Timekeeping / Payroll SFTP Feed  
-Simulate an external payroll/timekeeping vendor that automatically produces a weekly CSV and makes it available on its own SFTP server — Coresight pulls it. No human export or upload exists in the normal flow.  
+Simulate an external payroll/timekeeping vendor that automatically publishes a CSV to its own SFTP server on a schedule — Coresight pulls it. No human export or upload exists in the normal flow.  
 Fields: employee\_id, employee\_name, job\_code, work\_date, hours, hourly\_rate.  
-Access pattern: the ECS/Fargate task connects outbound to the vendor's SFTP server (TCP/22) during its scheduled run and performs an SFTP GET for that week's file. Host key and credentials are checked against values stored in Secrets Manager; verification must remain enabled and is never bypassed for convenience.  
-Include missing job codes, incorrect week assignments, duplicate rows, and corrections in later files, plus realistic connection failure modes: missing file, bad credentials, bad host key, connection timeout, malformed CSV, empty CSV.
+Full-history report, not a weekly delta. SFTP itself has no notion of full vs. incremental — it is only a file drop — so this is a vendor-side report configuration: a report defined over an unbounded date range, scheduled for delivery. Enterprise-tier payroll vendors (ADP, UKG, Paylocity, isolved) support this routinely; see section 13 for the audit question of whether a given client's vendor actually does.  
+Access pattern: each batch lands as its own dated file (`labor\_\<YYYYMMDD\>.csv`) containing every labor row the vendor knows about, matching the convention that vendors stamp each scheduled delivery rather than overwriting in place. Prior drops remain on the server as vendor-side history. The ECS/Fargate task connects outbound to the vendor's SFTP server (TCP/22) during its scheduled run, lists the drop directory, selects the newest file, and performs an SFTP GET. Host key and credentials are checked against values stored in Secrets Manager; verification must remain enabled and is never bypassed for convenience.  
+Because every drop is a full load, a vendor correction needs no separate correction file — the fixed row is simply present in the next dump, and the task cannot distinguish it from a row that was always correct. Retaining prior drops also means a failed run can be replayed against exactly the file it originally consumed.  
+Include missing job codes, incorrect week assignments, duplicate rows, and corrections appearing in later dumps, plus realistic connection failure modes: missing file, bad credentials, bad host key, connection timeout, malformed CSV, empty CSV.
 
 # 3\. Core Architecture
 
@@ -154,7 +156,7 @@ Example layout
 runs/\<run\_id\>/raw/jobs.json  
 runs/\<run\_id\>/raw/invoices.json  
 runs/\<run\_id\>/raw/expenses.json  
-runs/\<run\_id\>/raw/labor.csv  
+runs/\<run\_id\>/raw/labor.csv  (the payroll dump exactly as fetched; record the vendor's original filename in the run manifest so a run can be traced back to the specific drop it consumed)  
 runs/\<run\_id\>/candidate/job\_profitability.csv  
 runs/\<run\_id\>/candidate/exceptions.csv  
 runs/\<run\_id\>/metadata/validation\_results.json  
@@ -166,7 +168,7 @@ published/current/exceptions.csv
 published/current/summary.json
 
 Run manifest  
-Store run\_id, started\_at, completed\_at, status, source row counts, output row counts, exception count, validation status, raw S3 prefix, published flag, and error details if applicable.
+Store run\_id, started\_at, completed\_at, status, source row counts, output row counts, exception count, validation status, raw S3 prefix, published flag, the source payroll dump filename, and error details if applicable.
 
 Retention principle  
 Raw snapshots are retained long enough to support debugging and auditability. Published outputs remain versioned by run. A failed run must never overwrite the last known-good published report.
@@ -203,7 +205,9 @@ Execution flow
 15\. Emit logs/metrics.
 
 Full-load principle  
-Each scheduled run re-extracts the full relevant dataset from each source system. No CDC, watermark, incremental MERGE, or historical change-capture logic is required for the POC. Source corrections should naturally be reflected on the next successful full run.
+Each scheduled run re-extracts the full relevant dataset from each source system — all three, payroll included. No CDC, watermark, incremental MERGE, or historical change-capture logic is required for the POC. Source corrections should naturally be reflected on the next successful full run.
+
+This holds uniformly: the CRM and Accounting APIs return their whole dataset in one call, and the payroll vendor publishes its entire labor history in each dated SFTP drop. No source delivers a delta, so the pipeline never has to reason about which records are new — it replaces its view of each source wholesale on every run.
 
 # 7\. Business Rules to Simulate
 
@@ -264,12 +268,12 @@ Invoices corrected after an earlier run.
 Source records updated between runs.  
 Malformed or missing required fields.  
 One API response that returns an unexpected schema.  
-SFTP: missing file for one scheduled run.  
+SFTP: no new dump present for one scheduled run.  
 SFTP: bad credentials.  
 SFTP: bad host key.  
 SFTP: connection timeout.  
 SFTP: malformed or empty CSV.  
-SFTP: corrected file delivered on a later run.
+SFTP: corrected row delivered in a later full dump.
 
 # 10\. Delivery Abstraction and End-User Delivery
 
@@ -308,9 +312,9 @@ Use a separate endpoint/schema from the field-service API.
 Generate vendor/material expenses with direct, indirect, ambiguous, and missing job references.
 
 Fake timekeeping SFTP server  
-Separately provisioned SFTP endpoint (see section 11) that hosts one weekly CSV at a time for the ECS task to pull.  
-Payroll generator script creates each week's CSV and places it on the fake SFTP server.  
-Create occasional corrected replacement or follow-up records.
+Separately provisioned SFTP endpoint (see section 11) hosting a drop directory of dated full-history CSVs for the ECS task to list and pull the newest of.  
+`synthetic\_data\_generation/generate\_base\_data.py` writes the baseline dump; `apply\_corrections.py` publishes each subsequent dump, leaving earlier ones in place as vendor-side history. Both share the drop-naming and newest-file rules via `payroll\_feed.py`, so the generators and the ingestion task's SFTP client cannot drift apart.  
+Create occasional corrected records; under a full-load feed these appear as revised rows inside the next dump rather than as separate correction files.
 
 Data volume  
 Keep volume modest: thousands to low hundreds of thousands of rows are enough. The purpose is workflow realism, correctness, recoverability, and business value—not scale benchmarking.
@@ -350,7 +354,9 @@ Are all required historical records accessible?
 What delivery method does the client actually want?  
 Are there data-retention requirements?  
 Is the simple public-Fargate design sufficient, or does a real requirement earn the NAT Gateway escalation pattern?  
-Does the payroll/timekeeping vendor actually support outbound SFTP pull, or only a manual portal export or emailed report? This determines whether Source C's SFTP-pull design is viable as-is for a given client — many SMB-tier payroll vendors only offer manual export, not vendor-hosted SFTP.
+Does the payroll/timekeeping vendor actually support outbound SFTP pull, or only a manual portal export or emailed report? This determines whether Source C's SFTP-pull design is viable as-is for a given client — many SMB-tier payroll vendors only offer manual export, not vendor-hosted SFTP.  
+If it does support SFTP, can the delivered report be configured over an unbounded date range so each drop is a full history, or is it locked to a single pay period? A period-scoped feed would break the full-load principle for Source C and force either a stitch-together step or an escalation to incremental handling — decide this in the Audit, not during implementation.  
+What is the vendor's filename convention, and does it retain prior drops or overwrite in place? The newest-file selection logic depends on the answer.
 
 Important  
 Distinguish simulated client facts from assumptions invented for the POC. The audit should explicitly determine whether a simple full-refresh file-first pattern is sufficient or whether the client's requirements justify a database-backed pattern, and whether the public-subnet networking default is sufficient or a client requirement earns the NAT Gateway escalation pattern.

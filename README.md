@@ -21,10 +21,16 @@ validates it, and emails the operations manager a summary with secure links
 to the results — while flagging anything it can't confidently reconcile as
 an exception for human review.
 
+Every source is a **full load**: the two APIs return their whole dataset in
+one call, and the payroll vendor publishes its entire labor history in each
+dated SFTP drop. Nothing delivers a delta, so there is no CDC, no watermark,
+and no incremental merge anywhere in the pipeline — and a source correction
+simply shows up on the next run.
+
 **Sources combined:**
 - **Field Service / CRM API** (ServiceTitan-like) — customers, jobs, invoices
 - **Accounting API** (QuickBooks-like) — vendor expenses, material purchases
-- **Timekeeping SFTP feed** — weekly labor CSV pulled from an external vendor's SFTP server
+- **Timekeeping SFTP feed** — full labor history pulled from an external vendor's SFTP server
 
 **Report calculates:** revenue, labor cost, material cost, gross profit, and
 gross margin per job — with a companion exceptions report for anything that
@@ -84,7 +90,41 @@ outbound-only connections. See
 [`docs/project-overview.md`](docs/project-overview.md) for the complete
 spec, business rules, validation catalog, and build plan.
 
+## Generating the Fake Dataset
+
+Phase 1 lives in [`synthetic_data_generation/`](synthetic_data_generation/) and
+writes to a gitignored `data/` directory at the repo root.
+
+```bash
+# Baseline dataset, with every known defect seeded. Deterministic given --seed.
+python3 synthetic_data_generation/generate_base_data.py
+
+# Simulate the next batch: corrected invoices, jobs advancing status, an
+# ambiguous expense resolved, and a fresh full payroll dump. Run it repeatedly.
+python3 synthetic_data_generation/apply_corrections.py --seed 7
+```
+
+This produces the backing store for the three fake sources:
+
+```
+data/
+  field-service/customers.json, jobs.json, invoices.json   # CRM API returns these whole
+  accounting/expenses.json                                 # Accounting API returns this whole
+  payroll/labor_<YYYYMMDD>.csv                             # one full-history dump per batch
+  defects_manifest.json                                    # every defect seeded, by record ID
+  corrections_log.json                                     # what each batch changed
+```
+
+The payroll directory models the vendor's SFTP drop: each batch adds a new dated
+dump of the **complete** labor history and leaves earlier ones in place, so the
+ingestion task lists the directory and pulls the newest. That's why a payroll
+correction needs no correction file — the fixed row is just already right in the
+next dump. See
+[`synthetic_data_generation/docs/known_defects.md`](synthetic_data_generation/docs/known_defects.md)
+for what each seeded defect should do downstream.
+
 ## Status
 
-Early-stage POC. See `docs/project-overview.md` for the phased build order
-(Phase 1: fake data generation → Phase 13: engagement retrospective).
+Early-stage POC. See [`docs/project-overview.md`](docs/project-overview.md) for
+the phased build order (Phase 1: fake data generation → Phase 13: engagement
+retrospective).

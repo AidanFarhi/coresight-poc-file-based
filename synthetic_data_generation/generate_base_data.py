@@ -1,29 +1,38 @@
 #!/usr/bin/env python3
 """Generate the baseline fake-source dataset for the Coresight file-based POC.
 
-Writes, under --out-dir (default fake_sources/data):
+Writes, under --out-dir (default <repo>/data):
     field-service/customers.json
     field-service/jobs.json
     field-service/invoices.json
     accounting/expenses.json
-    payroll/<iso-year>-W<iso-week>.csv   (one file per week that had jobs scheduled)
-    defects_manifest.json                (record-level list of every defect seeded below)
+    payroll/labor_<YYYYMMDD>.csv  (one full-history dump — see payroll_feed.py)
+    defects_manifest.json         (record-level list of every defect seeded below)
 
-Deterministic given the same --seed, so the output can be reviewed and diffed like
-any other checked-in file. See known_defects.md for what each defect category is
-expected to do downstream (validation failure vs. exception vs. silently excluded).
+Every source here is a full load. The field-service and accounting JSON files back
+APIs that return their whole dataset on each call, and the payroll vendor publishes
+its entire labor history as one dated CSV per batch. There is no per-week payroll
+file and no incremental grain anywhere in this dataset.
+
+The payroll drop directory is cleared first, so this script always leaves the
+simulated SFTP server holding exactly one baseline dump.
+
+Deterministic given the same --seed (pass --batch-date too if you also need the
+dump filename to be stable). See docs/known_defects.md for what each defect
+category is expected to do downstream — validation failure vs. business exception
+vs. silently excluded.
 
 Usage:
-    python fake_sources/data_gen/generate_base_data.py [--seed 42] [--months 8] [--out-dir fake_sources/data]
+    python synthetic_data_generation/generate_base_data.py [--seed 42] [--months 8] [--out-dir data]
 """
 
 import argparse
-import csv
 import json
 import random
-from collections import defaultdict
 from datetime import date, timedelta
 from pathlib import Path
+
+import payroll_feed
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_OUT_DIR = SCRIPT_DIR.parent / "data"
@@ -66,42 +75,12 @@ VENDORS = [
     "Home Depot Pro", "United Refrigeration",
 ]
 
-EMPLOYEES = [
-    ("EMP-01", "Marcus Reed", 32.00),
-    ("EMP-02", "Dana Whitfield", 29.50),
-    ("EMP-03", "Luis Ortega", 34.00),
-    ("EMP-04", "Priya Nair", 31.00),
-    ("EMP-05", "Chris Boyle", 27.50),
-    ("EMP-06", "Angela Ford", 33.00),
-    ("EMP-07", "Sam Delacroix", 28.00),
-    ("EMP-08", "Nina Petrov", 30.50),
-    ("EMP-09", "Tyrell Banks", 26.00),
-    ("EMP-10", "Wendy Salazar", 32.50),
-    ("EMP-11", "Derek Munoz", 29.00),
-    ("EMP-12", "Kayla Simmons", 31.50),
-    ("EMP-13", "Jamal Carter", 27.00),
-    ("EMP-14", "Elena Rossi", 33.50),
-    ("EMP-15", "Trevor Lang", 26.50),
-    ("EMP-16", "Monica Reyes", 30.00),
-    ("EMP-17", "Brian Kowalski", 34.50),
-    ("EMP-18", "Sofia Alvarado", 28.50),
-    ("EMP-19", "Grant Osei", 31.00),
-    ("EMP-20", "Renee Dubois", 29.50),
-    ("EMP-21", "Victor Chan", 32.00),
-    ("EMP-22", "Paula Ibarra", 27.50),
-    ("EMP-23", "Kevin Marsh", 33.00),
-    ("EMP-24", "Aisha Bello", 30.50),
-    ("EMP-25", "Todd Bergstrom", 26.00),
-]
-
 JOB_STATUS_WEIGHTS = [
     ("completed", 78),
     ("canceled", 8),
     ("in_progress", 8),
     ("scheduled", 6),
 ]
-
-PAYROLL_FIELDNAMES = ["employee_id", "employee_name", "job_code", "work_date", "hours", "hourly_rate"]
 
 
 def weighted_choice(rng, weighted_options):
@@ -122,14 +101,9 @@ def add_month(d):
     return date(year, month, 1)
 
 
-def week_label(d):
-    iso = d.isocalendar()
-    return f"{iso.year}-W{iso.week:02d}"
-
-
-def week_label_to_monday(label):
-    year_str, week_str = label.split("-W")
-    return date.fromisocalendar(int(year_str), int(week_str), 1)
+def monday_of(d):
+    """Labor is logged against the week a job was scheduled in."""
+    return d - timedelta(days=d.weekday())
 
 
 def next_seq(records, id_field, prefix):
@@ -271,40 +245,32 @@ def build_expenses(rng, jobs, customers):
     return expenses
 
 
-def group_jobs_by_week(jobs):
-    by_week = defaultdict(list)
+def build_payroll(rng, jobs):
+    """The vendor's complete labor history as one flat row set. There are no per-week
+    files — every batch republishes all of these rows, so the weekly grain survives
+    only in work_date."""
+    rows = []
     for job in jobs:
         if job["status"] not in ("completed", "in_progress"):
             continue
-        by_week[week_label(date.fromisoformat(job["scheduled_date"]))].append(job["job_id"])
-    return by_week
+        monday = monday_of(date.fromisoformat(job["scheduled_date"]))
+        for _ in range(rng.randint(1, 2)):
+            employee_id, employee_name, rate = rng.choice(payroll_feed.EMPLOYEES)
+            work_date = monday + timedelta(days=rng.randint(0, 4))
+            rows.append({
+                "employee_id": employee_id,
+                "employee_name": employee_name,
+                "job_code": job["job_id"],
+                "work_date": work_date.isoformat(),
+                "hours": round(rng.uniform(1.5, 9.0), 2),
+                "hourly_rate": rate,
+            })
+    return rows
 
 
-def build_payroll(rng, jobs):
-    by_week = group_jobs_by_week(jobs)
-    payroll_by_week = {}
-    for label, job_ids in by_week.items():
-        monday = week_label_to_monday(label)
-        rows = []
-        for job_id in job_ids:
-            for _ in range(rng.randint(1, 2)):
-                employee_id, employee_name, rate = rng.choice(EMPLOYEES)
-                work_date = monday + timedelta(days=rng.randint(0, 4))
-                rows.append({
-                    "employee_id": employee_id,
-                    "employee_name": employee_name,
-                    "job_code": job_id,
-                    "work_date": work_date.isoformat(),
-                    "hours": round(rng.uniform(1.5, 9.0), 2),
-                    "hourly_rate": rate,
-                })
-        payroll_by_week[label] = rows
-    return payroll_by_week
-
-
-def inject_known_defects(rng, customers, jobs, invoices, expenses, payroll_by_week):
+def inject_known_defects(rng, customers, jobs, invoices, expenses, labor_rows):
     """Mutates the generated dataset in place and returns a manifest describing
-    exactly which records were altered and why. See known_defects.md for the
+    exactly which records were altered and why. See docs/known_defects.md for the
     expected downstream validation/exception behavior of each defect type."""
     manifest = []
     touched_invoice_ids = set()
@@ -339,27 +305,29 @@ def inject_known_defects(rng, customers, jobs, invoices, expenses, payroll_by_we
         inv["job_id"] = None
 
     # 3. Unknown job codes in payroll.
-    all_rows = [(week, row) for week, rows in payroll_by_week.items() for row in rows]
-    unknown_targets = rng.sample(all_rows, k=min(4, len(all_rows)))
-    touched_rows = set(id(row) for _, row in unknown_targets)
-    for week, row in unknown_targets:
+    unknown_targets = rng.sample(labor_rows, k=min(4, len(labor_rows)))
+    touched_rows = set(id(row) for row in unknown_targets)
+    for row in unknown_targets:
+        original_job_id = row["job_code"]
+        row["job_code"] = f"JOB-9{rng.randint(9000, 9999)}"
         manifest.append({
             "type": "unknown_job_code", "source_system": "payroll",
-            "record_id": f"{week}:{row['employee_id']}:{row['work_date']}",
-            "job_id": row["job_code"],
-            "description": "job_code replaced with a code that does not exist in jobs.json.",
+            "record_id": payroll_feed.record_id(row),
+            "job_id": original_job_id,
+            "description": f"job_code rewritten to {row['job_code']}, which does not exist in "
+                           f"jobs.json (the row's real work was against {original_job_id}).",
         })
-        row["job_code"] = f"JOB-9{rng.randint(9000, 9999)}"
 
-    # 4. Duplicate labor rows: append a verbatim copy within the same weekly file.
-    remaining_rows = [(w, r) for w, r in all_rows if id(r) not in touched_rows]
+    # 4. Duplicate labor rows: append a verbatim copy inside the same full dump.
+    remaining_rows = [r for r in labor_rows if id(r) not in touched_rows]
     dup_labor_targets = rng.sample(remaining_rows, k=min(4, len(remaining_rows)))
-    for week, row in dup_labor_targets:
-        payroll_by_week[week].append(dict(row))
+    for row in dup_labor_targets:
+        labor_rows.append(dict(row))
         manifest.append({
             "type": "duplicate_labor_row", "source_system": "payroll",
-            "record_id": f"{week}:{row['employee_id']}:{row['work_date']}",
-            "description": "row duplicated verbatim within the same weekly CSV.",
+            "record_id": payroll_feed.record_id(row),
+            "description": "row duplicated verbatim inside the same full dump; only one copy "
+                           "may contribute to labor cost.",
         })
 
     # 5. Canceled jobs that still carry labor/material costs.
@@ -379,18 +347,16 @@ def inject_known_defects(rng, customers, jobs, invoices, expenses, payroll_by_we
             "status": "posted",
         })
         txn_seq += 1
-        label = week_label(date.fromisoformat(job["scheduled_date"]))
-        monday = week_label_to_monday(label)
-        employee_id, employee_name, rate = rng.choice(EMPLOYEES)
-        row = {
+        monday = monday_of(date.fromisoformat(job["scheduled_date"]))
+        employee_id, employee_name, rate = rng.choice(payroll_feed.EMPLOYEES)
+        labor_rows.append({
             "employee_id": employee_id,
             "employee_name": employee_name,
             "job_code": job["job_id"],
             "work_date": (monday + timedelta(days=rng.randint(0, 4))).isoformat(),
             "hours": round(rng.uniform(1.5, 6.0), 2),
             "hourly_rate": rate,
-        }
-        payroll_by_week.setdefault(label, []).append(row)
+        })
         manifest.append({
             "type": "canceled_job_with_costs", "source_system": "field_service",
             "record_id": job["job_id"],
@@ -433,21 +399,13 @@ def write_json(path, data):
         json.dump(data, f, indent=2)
 
 
-def write_payroll_csvs(out_dir, payroll_by_week):
-    payroll_dir = out_dir / "payroll"
-    payroll_dir.mkdir(parents=True, exist_ok=True)
-    for label, rows in sorted(payroll_by_week.items()):
-        with (payroll_dir / f"{label}.csv").open("w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=PAYROLL_FIELDNAMES)
-            writer.writeheader()
-            writer.writerows(rows)
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--months", type=int, default=8)
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
+    parser.add_argument("--batch-date", type=date.fromisoformat, default=date.today(),
+                        help="date stamped into the payroll dump filename (default: today)")
     args = parser.parse_args()
 
     rng = random.Random(args.seed)
@@ -456,21 +414,25 @@ def main():
     jobs = build_jobs(rng, customers, DEFAULT_START_DATE, args.months)
     invoices = build_invoices(rng, jobs)
     expenses = build_expenses(rng, jobs, customers)
-    payroll_by_week = build_payroll(rng, jobs)
+    labor_rows = build_payroll(rng, jobs)
 
-    manifest = inject_known_defects(rng, customers, jobs, invoices, expenses, payroll_by_week)
+    manifest = inject_known_defects(rng, customers, jobs, invoices, expenses, labor_rows)
 
     write_json(args.out_dir / "field-service" / "customers.json", customers)
     write_json(args.out_dir / "field-service" / "jobs.json", jobs)
     write_json(args.out_dir / "field-service" / "invoices.json", invoices)
     write_json(args.out_dir / "accounting" / "expenses.json", expenses)
-    write_payroll_csvs(args.out_dir, payroll_by_week)
     write_json(args.out_dir / "defects_manifest.json", manifest)
 
-    payroll_row_count = sum(len(rows) for rows in payroll_by_week.values())
+    cleared = payroll_feed.clear_dumps(args.out_dir)
+    dump_path = payroll_feed.write_dump(
+        payroll_feed.next_dump_path(args.out_dir, args.batch_date), labor_rows)
+
     print(f"seed={args.seed} months={args.months} out_dir={args.out_dir}")
     print(f"customers={len(customers)} jobs={len(jobs)} invoices={len(invoices)} "
-          f"expenses={len(expenses)} payroll_weeks={len(payroll_by_week)} payroll_rows={payroll_row_count}")
+          f"expenses={len(expenses)} labor_rows={len(labor_rows)}")
+    cleared_note = f" (cleared {len(cleared)} prior file(s))" if cleared else ""
+    print(f"payroll full dump: payroll/{dump_path.name}{cleared_note}")
     print(f"defects seeded: {len(manifest)} (see defects_manifest.json)")
 
 
