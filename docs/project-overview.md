@@ -38,7 +38,9 @@ The schema should intentionally differ from the field-service system. Some expen
 Source C — Payroll / Timekeeping File Feed  
 Simulate a payroll/timekeeping vendor that produces a weekly CSV.  
 Fields: employee\_id, employee\_name, job\_code, work\_date, hours, hourly\_rate.  
-Access pattern: no payroll vendor API, SFTP server, or inbound email address. A scheduled Lambda generates a short-lived, single-use presigned S3 POST URL scoped to that week's inbound key and emails it to the operations manager via SES; the ops manager opens the link, selects the file, and uploads directly to S3 — no AWS login, and the file never passes through application compute. This was chosen over AWS Transfer Family (SFTP) specifically to avoid its ~$216/month fixed per-protocol-hour cost, and over inbound email (SES receiving) to avoid owning/renewing a domain and MX/DKIM records just to receive one file a week.  
+Access pattern: no payroll vendor API, SFTP server, or inbound email address. A scheduled Lambda generates a short-lived presigned S3 POST URL scoped to a static payroll landing-zone prefix and emails it to the operations manager via SES; the ops manager opens the link, selects the file — the filename itself is flexible, only the destination prefix is fixed — and uploads directly to S3, no AWS login, file never passes through application compute. This was chosen over AWS Transfer Family (SFTP) specifically to avoid its ~$216/month fixed per-protocol-hour cost, and over inbound email (SES receiving) to avoid owning/renewing a domain and MX/DKIM records just to receive one file a week.  
+Multiple uploads to the landing zone in a given period are expected and fine (accidental re-uploads, a corrected version). Resolving that — picking the latest file by S3 modified time and archiving every file present in the landing zone at run time — is the ETL script's responsibility as part of its extract step, not a separate reconciliation process.  
+A second, independent Lambda triggers on every upload to the landing zone, runs a quick structural check on just that file, and emails the ops manager immediate pass/fail feedback. This is an early-warning courtesy signal only — it does not gate the pipeline or do any latest/archive resolution; the ETL's own validation at run time remains the authoritative check before publish.  
 Include missing job codes, incorrect week assignments, duplicate rows, and corrections in later files, plus an occasional week where the ops manager never uploads at all.
 
 # 3\. Simple File-First AWS Architecture
@@ -60,11 +62,12 @@ If critical validations pass: publish final files
 Email summary \+ secure download links
 
 Supporting services  
-S3: inbound payroll files, immutable raw snapshots, candidate outputs, published reports, validation results, and run manifests.  
-Lambda: generates the weekly presigned S3 upload URL for the payroll file (and renders the minimal upload-form page); fully decoupled from the ECS task's networking, so it does not need to sit in the private subnet.  
+S3: static payroll landing-zone prefix, immutable raw snapshots, candidate outputs, published reports, validation results, run manifests, and a per-run archive of every file seen in the payroll landing zone.  
+Lambda (upload-link): generates the weekly presigned S3 upload URL for the payroll landing zone (and renders the minimal upload-form page); fully decoupled from the ECS task's networking, so it does not need to sit in the private subnet.  
+Lambda (upload-validation): triggers on every upload to the payroll landing zone, runs a quick structural check on that file, and emails the ops manager pass/fail feedback — advisory only, does not gate the pipeline or pick/archive files.  
 CloudWatch: task logs, execution status, errors, and alarms.  
 EventBridge: invokes the scheduled ECS/Fargate task and the weekly payroll upload-link Lambda.  
-SES or equivalent delivery mechanism: sends the report summary and secure links to the end user, and sends the weekly payroll upload-link email.
+SES or equivalent delivery mechanism: sends the report summary and secure links to the end user, the weekly payroll upload-link email, and the upload-validation feedback email.
 
 Architecture principle  
 Use one deployable batch process with clearly separated code modules. Do not introduce Step Functions, RDS/Postgres, Airflow, Spark, Kafka, a lakehouse, or a warehouse unless a later client requirement actually earns that complexity.
@@ -74,10 +77,12 @@ Use one deployable batch process with clearly separated code modules. Do not int
 Every run should get its own immutable run ID/prefix so a failure can be inspected without re-extracting the source systems.
 
 Example layout  
+payroll-inbound/landing/\*.csv         (static landing zone; ops manager uploads here via presigned URL; filename flexible)  
 runs/\<run\_id\>/raw/jobs.json  
 runs/\<run\_id\>/raw/invoices.json  
 runs/\<run\_id\>/raw/expenses.json  
-runs/\<run\_id\>/raw/labor.csv  
+runs/\<run\_id\>/raw/labor.csv          (the latest landing-zone file as of this run, selected by the ETL)  
+runs/\<run\_id\>/payroll-archive/\*.csv  (every file present in the landing zone at run time, including non-selected duplicates)  
 runs/\<run\_id\>/candidate/job\_profitability.csv  
 runs/\<run\_id\>/candidate/exceptions.csv  
 runs/\<run\_id\>/metadata/validation\_results.json  
@@ -109,7 +114,7 @@ Execution flow
 Create run ID and run prefix.  
 Extract the full required dataset from the field-service API.  
 Extract the full required dataset from the accounting API.  
-Read the required payroll CSV from S3.  
+Resolve the payroll file: list the static landing-zone prefix, select the file with the latest S3 modified time as the authoritative source for this run, and archive every file present in the landing zone (including non-selected duplicates) under the run's prefix.  
 Persist each source exactly as received into the run's raw S3 prefix.  
 Load the raw files into memory/dataframes or local task storage.  
 Normalize, join, reconcile, and calculate the job-profitability dataset.  
@@ -210,8 +215,8 @@ Use a separate endpoint/schema from the field-service API.
 Generate vendor/material expenses with direct, indirect, ambiguous, and missing job references.
 
 Payroll generator  
-Python script that creates one weekly CSV at a time.  
-Simulates the presigned-URL upload flow locally: mints a mock presigned POST (no real AWS call), logs the "email" that would be sent to the ops manager, then simulates the ops manager uploading by writing the file into the inbound location — or, for a given week, simulates the ops manager never uploading at all.  
+Python script that creates one weekly CSV at a time, matching the fields/format the real presigned-URL upload flow expects.  
+The presigned-URL upload mechanism itself (upload-link Lambda, static landing zone, upload-validation Lambda) is real AWS infrastructure, not locally simulated — see section 2, Source C.  
 Create occasional corrected replacement or follow-up records.
 
 Data volume  
@@ -250,6 +255,7 @@ Infrastructure-as-code for the required AWS resources where practical.
 S3 buckets/prefixes and lifecycle configuration.  
 ECS/Fargate task definition and container image.  
 Lambda + minimal upload-form page (API Gateway) for the weekly payroll presigned-URL upload.  
+Lambda for post-upload payroll file validation and ops-manager notification.  
 EventBridge schedule(s).  
 CloudWatch logging and basic alarms.  
 SES or equivalent delivery configuration.
@@ -259,6 +265,7 @@ Fake-source generators/APIs.
 Full API extraction code.  
 Payroll CSV handling.  
 Presigned-URL generation logic for the weekly payroll upload.  
+Latest-file resolution and archive logic for the payroll landing zone (part of the extract step).  
 Raw S3 snapshot writer.  
 Transformation/reconciliation code.  
 Data-quality validators.  

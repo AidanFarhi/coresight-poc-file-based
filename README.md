@@ -46,10 +46,14 @@ flowchart TD
     SESUP --> OPS((Ops Manager))
     OPS -- uploads via presigned URL --> SRC3
 
+    SRC3 -.triggers.-> VALLAM[Lambda: Validate Upload]
+    VALLAM --> SESFB[SES: Pass/Fail Email]
+    SESFB --> OPS
+
     subgraph Sources
         SRC1[Field Service API]
         SRC2[Accounting API]
-        SRC3[Payroll CSV in S3]
+        SRC3[(S3: Payroll Landing Zone)]
     end
 
     Sources --> ECS
