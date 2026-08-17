@@ -24,7 +24,7 @@ an exception for human review.
 **Sources combined:**
 - **Field Service / CRM API** (ServiceTitan-like) — customers, jobs, invoices
 - **Accounting API** (QuickBooks-like) — vendor expenses, material purchases
-- **Payroll CSV feed** — weekly timekeeping file dropped in S3
+- **Timekeeping SFTP feed** — weekly labor CSV pulled from an external vendor's SFTP server
 
 **Report calculates:** revenue, labor cost, material cost, gross profit, and
 gross margin per job — with a companion exceptions report for anything that
@@ -33,30 +33,29 @@ canceled jobs with costs, etc.).
 
 ## Architecture
 
-Deliberately simple: **one deployable batch task**, immutable S3 snapshots
-for auditability, and a safe publish step that never overwrites a known-good
-report with a broken one.
+Deliberately simple: **one deployable batch task**, an explicitly provisioned
+VPC with a public subnet and zero inbound security-group rules (no NAT
+Gateway by default — see [`docs/project-overview.md`](docs/project-overview.md)
+section 4), immutable S3 snapshots for auditability, and a safe publish step
+that never overwrites a known-good report with a broken one.
 
 ```mermaid
 flowchart TD
     EB[EventBridge Schedule] --> ECS[ECS / Fargate Batch Task]
+    SM[Secrets Manager] -.credentials.-> ECS
 
-    EB2[EventBridge: Weekly Payroll Reminder] --> LAM[Lambda: Presigned Upload URL]
-    LAM --> SESUP[SES: Upload Link Email]
-    SESUP --> OPS((Ops Manager))
-    OPS -- uploads via presigned URL --> SRC3
+    subgraph VPC[Coresight VPC — Public Subnet, No Inbound Rules]
+        ECS
+    end
+    IGW[Internet Gateway] --- VPC
 
-    SRC3 -.triggers.-> VALLAM[Lambda: Validate Upload]
-    VALLAM --> SESFB[SES: Pass/Fail Email]
-    SESFB --> OPS
-
-    subgraph Sources
+    subgraph Sources[External Sources — outbound only]
         SRC1[Field Service API]
         SRC2[Accounting API]
-        SRC3[(S3: Payroll Landing Zone)]
+        SRC3[Timekeeping SFTP Server]
     end
 
-    Sources --> ECS
+    ECS -- HTTPS / SFTP, outbound only --> Sources
 
     ECS --> RAW[(S3: Immutable Raw Snapshot)]
     RAW --> XFORM[Transform + Validate]
@@ -79,7 +78,9 @@ bad run can never clobber the last known-good published report.
 ## What This Is Not
 
 No Postgres/RDS, no data warehouse, no Step Functions, no Spark/Kafka, no
-lakehouse, no incremental/CDC logic — every run does a full extract. See
+lakehouse, no incremental/CDC logic, no NAT Gateway or private subnet by
+default, no manual upload workflow — every run does a full extract over
+outbound-only connections. See
 [`docs/project-overview.md`](docs/project-overview.md) for the complete
 spec, business rules, validation catalog, and build plan.
 

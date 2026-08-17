@@ -43,14 +43,14 @@ for a reproducible batch).
 
 ## Explicitly out of scope for these two scripts
 
-These two defects from section 8 belong to components that don't exist yet and
+These defects from section 9 belong to components that don't exist yet and
 are called out here so they aren't forgotten, not because they're unimportant:
 
-- **Missing payroll file for one scheduled run** — this is a property of the
-  real presigned-URL upload flow (section 2, Source C / section 10): a given
-  week's file just never lands in the S3 inbound prefix because the ops
-  manager didn't upload it. Not something these two local generator scripts
-  produce.
+- **SFTP failure modes** (missing file, bad credentials, bad host key,
+  connection timeout, malformed/empty CSV, corrected file on a later run) —
+  these are properties of the fake timekeeping SFTP server and the ECS task's
+  SFTP client code (`docs/project-overview.md` section 2, Source C / section
+  12), not something these two local JSON/CSV generator scripts produce.
 - **One API response that returns an unexpected schema** — this belongs to the
   fake `field_service_api` / `accounting_api` apps (schema drift is a property
   of the API response shape, not of the underlying JSON files these scripts
