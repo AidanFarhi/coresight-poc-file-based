@@ -38,8 +38,8 @@ The schema should intentionally differ from the field-service system. Some expen
 Source C — Payroll / Timekeeping File Feed  
 Simulate a payroll/timekeeping vendor that produces a weekly CSV.  
 Fields: employee\_id, employee\_name, job\_code, work\_date, hours, hourly\_rate.  
-Access pattern: a new CSV is placed in an S3 inbound prefix each week.  
-Include missing job codes, incorrect week assignments, duplicate rows, and corrections in later files.
+Access pattern: no payroll vendor API, SFTP server, or inbound email address. A scheduled Lambda generates a short-lived, single-use presigned S3 POST URL scoped to that week's inbound key and emails it to the operations manager via SES; the ops manager opens the link, selects the file, and uploads directly to S3 — no AWS login, and the file never passes through application compute. This was chosen over AWS Transfer Family (SFTP) specifically to avoid its ~$216/month fixed per-protocol-hour cost, and over inbound email (SES receiving) to avoid owning/renewing a domain and MX/DKIM records just to receive one file a week.  
+Include missing job codes, incorrect week assignments, duplicate rows, and corrections in later files, plus an occasional week where the ops manager never uploads at all.
 
 # 3\. Simple File-First AWS Architecture
 
@@ -61,9 +61,10 @@ Email summary \+ secure download links
 
 Supporting services  
 S3: inbound payroll files, immutable raw snapshots, candidate outputs, published reports, validation results, and run manifests.  
+Lambda: generates the weekly presigned S3 upload URL for the payroll file (and renders the minimal upload-form page); fully decoupled from the ECS task's networking, so it does not need to sit in the private subnet.  
 CloudWatch: task logs, execution status, errors, and alarms.  
-EventBridge: invokes the scheduled ECS/Fargate task.  
-SES or equivalent delivery mechanism: sends the report summary and secure links to the end user.
+EventBridge: invokes the scheduled ECS/Fargate task and the weekly payroll upload-link Lambda.  
+SES or equivalent delivery mechanism: sends the report summary and secure links to the end user, and sends the weekly payroll upload-link email.
 
 Architecture principle  
 Use one deployable batch process with clearly separated code modules. Do not introduce Step Functions, RDS/Postgres, Airflow, Spark, Kafka, a lakehouse, or a warehouse unless a later client requirement actually earns that complexity.
@@ -210,7 +211,7 @@ Generate vendor/material expenses with direct, indirect, ambiguous, and missing 
 
 Payroll generator  
 Python script that creates one weekly CSV at a time.  
-Write files into the S3 inbound location.  
+Simulates the presigned-URL upload flow locally: mints a mock presigned POST (no real AWS call), logs the "email" that would be sent to the ops manager, then simulates the ops manager uploading by writing the file into the inbound location — or, for a given week, simulates the ops manager never uploading at all.  
 Create occasional corrected replacement or follow-up records.
 
 Data volume  
@@ -248,7 +249,8 @@ New isolated AWS sandbox account.
 Infrastructure-as-code for the required AWS resources where practical.  
 S3 buckets/prefixes and lifecycle configuration.  
 ECS/Fargate task definition and container image.  
-EventBridge schedule.  
+Lambda + minimal upload-form page (API Gateway) for the weekly payroll presigned-URL upload.  
+EventBridge schedule(s).  
 CloudWatch logging and basic alarms.  
 SES or equivalent delivery configuration.
 
@@ -256,6 +258,7 @@ Application / data code
 Fake-source generators/APIs.  
 Full API extraction code.  
 Payroll CSV handling.  
+Presigned-URL generation logic for the weekly payroll upload.  
 Raw S3 snapshot writer.  
 Transformation/reconciliation code.  
 Data-quality validators.  

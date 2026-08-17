@@ -41,6 +41,11 @@ report with a broken one.
 flowchart TD
     EB[EventBridge Schedule] --> ECS[ECS / Fargate Batch Task]
 
+    EB2[EventBridge: Weekly Payroll Reminder] --> LAM[Lambda: Presigned Upload URL]
+    LAM --> SESUP[SES: Upload Link Email]
+    SESUP --> OPS((Ops Manager))
+    OPS -- uploads via presigned URL --> SRC3
+
     subgraph Sources
         SRC1[Field Service API]
         SRC2[Accounting API]

@@ -1,6 +1,6 @@
 # Known Defects Catalog
 
-This catalog documents every data-quality defect deliberately seeded by the two
+This catalog documents every data-quality defect deliberately seeded by the
 generator scripts in this directory, per `docs/project-overview.md` sections 7
 and 8 ("create known defects... so the expected validation and exception
 results are known before the pipeline runs").
@@ -10,9 +10,13 @@ scripts themselves on every run:
 
 - `generate_base_data.py` writes `fake_sources/data/defects_manifest.json`.
 - `apply_corrections.py` appends a batch to `fake_sources/data/corrections_log.json`.
+- `simulate_payroll_upload.py` appends a batch to `fake_sources/data/payroll_uploads_log.json`.
 
-Both are regenerated/appended deterministically (given `--seed`), so `git diff`
-on those files is the fastest way to see exactly what changed and why.
+`generate_base_data.py` and `apply_corrections.py` are regenerated/appended
+deterministically (given `--seed`); `simulate_payroll_upload.py` is invoked
+per week/per scenario via `--week` and `--simulate-missed-upload` rather than
+a seed. `git diff` on the JSON logs is the fastest way to see exactly what
+changed and why.
 
 ## Seeded by `generate_base_data.py`
 
@@ -41,15 +45,20 @@ for a reproducible batch).
 | Ambiguous match resolved | accounting | `expenses[].job_ref` populated on a previously `customer_ref`-only row | Confirms the exception path is temporary/correctable, not a permanent data-loss condition. |
 | Payroll correction / follow-up file | payroll | new `*_correction_<date>.csv` file alongside an existing weekly file, single corrected row | Simulates a real payroll vendor's follow-up feed; transform logic must apply the corrected hours without double-counting the original row. |
 
-## Explicitly out of scope for these two scripts
+## Seeded by `simulate_payroll_upload.py`
 
-These two defects from section 8 belong to components that don't exist yet and
-are called out here so they aren't forgotten, not because they're unimportant:
+Models the weekly presigned-URL upload flow described in `docs/project-overview.md`
+section 2 (Source C). Run per week, against the output of `generate_base_data.py`.
 
-- **Missing payroll file for one scheduled run** — this is a property of the
-  *weekly* payroll generator (section 10), which decides whether to write a
-  given week's file at all when the pipeline runs live. `generate_base_data.py`
-  only backfills historical weeks and always writes one file per week.
+| Defect | Source system | What changes | Expected pipeline behavior |
+|---|---|---|---|
+| Missing payroll file for one scheduled run | payroll | `--simulate-missed-upload`: no file written to `payroll_inbound/<week>.csv` | Structural validation should flag the missing expected source file for that run; this is a **critical** failure per section 7. |
+
+## Explicitly out of scope for these scripts
+
+This defect from section 8 belongs to a component that doesn't exist yet and is
+called out here so it isn't forgotten, not because it's unimportant:
+
 - **One API response that returns an unexpected schema** — this belongs to the
   fake `field_service_api` / `accounting_api` apps (schema drift is a property
   of the API response shape, not of the underlying JSON files these scripts
